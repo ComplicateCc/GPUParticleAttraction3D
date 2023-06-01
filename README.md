@@ -9,3 +9,6 @@
 ## BUG
 Freeze When Start Sometimes.
 Not sure the reason yet, try to change the particle size
+
+## Notes
+Try to change the targetTransform position to get the effect
