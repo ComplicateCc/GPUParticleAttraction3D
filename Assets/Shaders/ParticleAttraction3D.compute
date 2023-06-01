@@ -1,0 +1,181 @@
+﻿#pragma kernel Attract
+#pragma kernel Update
+
+#include "ParticleDataCommon3D.cginc"
+#include "SimplexNoise3D.cginc"
+
+#define THREAD_NUM 512
+
+// Attraction buffer for read and write
+RWStructuredBuffer<float3> _AttractionBuffer;
+// Particle data buffer for read
+StructuredBuffer<ParticleData3D> _ParticleDataBufferRead;
+// Particle data buffer for read and write
+RWStructuredBuffer<ParticleData3D> _ParticleDataBufferWrite;
+
+float _DeltaTime;
+float _MaxSpeed;
+float _AttractStrength;
+float _AvoidWallStrength;
+float3 _TargetPos;
+float3 _TargetVel;
+float3 _WallCenter;
+float3 _WallSize;
+
+float2 LimitSpeed(float2 vel, float max)
+{
+	float length = sqrt(dot(vel, vel));
+
+	// if speed is over max speed, map it to max speed
+	return (length > max&& length > 0) ? vel.xy * (max / length) : vel.xy;
+}
+
+float3 LimitSpeed(float3 vel, float max)
+{
+	float length = sqrt(dot(vel, vel));
+
+	// if speed is over max speed, map it to max speed
+	return (length > max&& length > 0) ? vel.xyz * (max / length) : vel.xyz;
+}
+
+float2 Rotate2D(float2 pos, float angle)
+{
+	float ra = radians(angle);
+	float2x2 mat = float2x2(cos(ra), -sin(ra), sin(ra),  cos(ra));
+	return mul(mat, pos);
+}
+
+float3 Rotate3D(float3 pos, float3 axis, float angle)
+{
+	float ra = radians(angle);
+	float3x3 mat = float3x3(
+		cos(ra) + axis.x * axis.x * (1 - cos(ra)), axis.x * axis.y * (1 - cos(ra)) - axis.z * sin(ra), axis.x * axis.z * (1 - cos(ra)) + axis.y * sin(ra),
+		axis.y * axis.x * (1 - cos(ra)) + axis.z * sin(ra), cos(ra) + axis.y * axis.y * (1 - cos(ra)), axis.y * axis.z * (1 - cos(ra)) - axis.x * sin(ra),
+		axis.z * axis.x * (1 - cos(ra)) - axis.y * sin(ra), axis.z * axis.y * (1 - cos(ra)) + axis.x * sin(ra), cos(ra) + axis.z * axis.z * (1 - cos(ra))
+	);
+	return mul(mat, pos);
+} 
+
+// To make sure that all particles are in the simulation area
+float2 AvoidWall2D(float2 pos)
+{
+	float3 wc = _WallCenter.xyz;
+	float3 ws = _WallSize.xyz;
+	float2 acc = float2(0, 0);
+
+	// x
+	acc.x = (pos.x < wc.x - ws.x * 0.5) ? acc.x + 1.0 : acc.x;
+	acc.x = (pos.x > wc.x + ws.x * 0.5) ? acc.x - 1.0 : acc.x;
+
+	// y
+	acc.y = (pos.y < wc.y - ws.y * 0.5) ? acc.y + 1.0 : acc.y;
+	acc.y = (pos.y > wc.y + ws.y * 0.5) ? acc.y - 1.0 : acc.y;
+
+	return acc;
+}
+
+// To make sure that all particles are in the simulation area
+float3 AvoidWall3D(float3 pos)
+{
+	float3 wc = _WallCenter.xyz;
+	float3 ws = _WallSize.xyz;
+	float3 acc = float3(0, 0, 0);
+
+	// x
+	acc.x = (pos.x < wc.x - ws.x * 0.5) ? acc.x + 1.0 : acc.x;
+	acc.x = (pos.x > wc.x + ws.x * 0.5) ? acc.x - 1.0 : acc.x;
+
+	// y
+	acc.y = (pos.y < wc.y - ws.y * 0.5) ? acc.y + 1.0 : acc.y;
+	acc.y = (pos.y > wc.y + ws.y * 0.5) ? acc.y - 1.0 : acc.y;
+
+	// z
+	acc.z = (pos.z < wc.z - ws.z * 0.5) ? acc.z + 1.0 : acc.z;
+	acc.z = (pos.z > wc.z + ws.z * 0.5) ? acc.z - 1.0 : acc.z;
+	
+	return acc;
+}
+
+[numthreads(THREAD_NUM, 1, 1)]
+void Attract(uint3 id : SV_DispatchThreadID)
+{
+	uint idx = id.x;
+	float3 particlePos = _ParticleDataBufferRead[idx].position;
+
+	// calculate attraction vector
+	float3 attract = _TargetPos - particlePos;
+	float sqDist = dot(attract, attract);
+	float targetSpeed = sqrt(dot(_TargetVel, _TargetVel));
+	attract = normalize(attract);
+	// The closer to mousePos the particle is, the stronger attraction works
+	// The faster the mouse moves, the faster the particle follows
+	attract = (1 / sqDist) * _AttractStrength * max(targetSpeed, 1.0) * attract;
+
+	// update attraction buffer
+	_AttractionBuffer[idx] = attract;
+}
+
+[numthreads(THREAD_NUM, 1, 1)]
+void Update(uint3 id : SV_DispatchThreadID)
+{
+	uint idx = id.x;
+	ParticleData3D p = _ParticleDataBufferWrite[idx];
+	float3 acc = _AttractionBuffer[idx];
+
+	// add force not to escape from the simulation area
+	acc += AvoidWall3D(p.position) * _AvoidWallStrength;
+
+	// update velocity
+	if (length(acc) > 0)
+	{
+		p.velocity += acc * _DeltaTime;
+	}
+	else
+	{
+		// ----- add curling -----
+		// vector from mouse to pos
+		float3 m2p = p.position - _TargetPos;
+		
+		// set 0.005 if the distance is close enough
+		// because the value gets too high when calculating 1 / dist.
+		float dist = max(sqrt(dot(m2p, m2p)), 0.01);
+		
+		float2 curlVel = Rotate2D(m2p, (1 / dist)) - m2p;
+		p.velocity.xy += curlVel * (1 / pow(dist, 8)) * p.uniqueSpeed;
+
+		// 尝试转换成3D
+		// float3 curlVel = Rotate3D(m2p,cross(normalize(m2p),float3(0,1,0)) ,(1 / dist)) - m2p;
+		// p.velocity += curlVel * (1 / pow(dist, 8)) * p.uniqueSpeed;
+		
+		//// add noise a bit
+		// float noiseVal = snoise(float3(p.position * 0.4));
+		// p.velocity.z += lerp(-0.01, 0.01, noiseVal);
+
+		// decrease speed unless adding new force
+		float friction = 0.6;
+		p.velocity += (-p.velocity) * friction * _DeltaTime;
+	}
+	p.velocity = LimitSpeed(p.velocity, _MaxSpeed);
+
+	// update position
+	p.position += p.velocity * p.uniqueSpeed * _DeltaTime;
+	// p.position.z -= 0.01 * p.uniqueSpeed * _DeltaTime;
+	
+	// update color
+	float speed = sqrt(dot(p.velocity, p.velocity));
+	float3 col = float3
+	(
+		abs(p.velocity.x) / speed,
+		abs(p.velocity.y) / speed,
+		// abs(p.velocity.z) / speed
+		lerp(0.0, 1.0, speed / _MaxSpeed)
+	);
+	float alpha = 0.1 + 0.5 * speed / _MaxSpeed + 0.4 * saturate(dot(acc, acc));
+	p.color = float4(col, alpha);
+
+	// update particle
+	_ParticleDataBufferWrite[idx] = p;
+
+	// reset attraction 
+	_AttractionBuffer[idx] = float3(0, 0, 0);
+}
