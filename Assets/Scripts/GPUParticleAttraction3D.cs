@@ -103,9 +103,9 @@ namespace GPUParticleAttraction
             //     AttractParticle(mousePos, mouseVel);
             // }
 
-            if (transform != null)
+            if (targetTrans != null)
             {
-                Vector3 currentPos = transform.position;
+                Vector3 currentPos = targetTrans.position;
                 if (Vector3.Distance(_lastTargetPos, currentPos) > MovementThresh)
                 {
                     Vector3 targetVel = new Vector3( (currentPos.x - _lastTargetPos.x) / Time.deltaTime, (currentPos.y - _lastTargetPos.y) / Time.deltaTime, (currentPos.z - _lastTargetPos.z) / Time.deltaTime );
