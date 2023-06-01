@@ -69,6 +69,8 @@ namespace GPUParticleAttraction
 
         private void Start()
         {
+            Application.targetFrameRate = -1;
+            
             InitBuffer();
 
             // set kernel ID
